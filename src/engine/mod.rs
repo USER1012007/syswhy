@@ -1,9 +1,11 @@
-use crate::backend::{BackendState, BackendStatus};
+use crate::backend::filesystem::FileSystemBackend;
+use crate::backend::{Backend, BackendError, BackendState, BackendStatus, SystemContext};
 use crate::core::{EntityId, EvidenceGraph, Query};
 
 #[derive(Debug, Clone)]
 pub struct Investigation {
     pub query: Query,
+    pub answer: String,
     pub graph: EvidenceGraph,
     pub matches: Vec<EntityId>,
     pub incomplete: Vec<String>,
@@ -14,6 +16,7 @@ impl Investigation {
     pub fn empty(query: Query) -> Self {
         Self {
             query,
+            answer: "No explanation available yet.".to_string(),
             graph: EvidenceGraph::new(),
             matches: Vec::new(),
             incomplete: vec!["No backend has produced an explanation for this query.".to_string()],
@@ -36,6 +39,128 @@ impl Engine {
     }
 
     pub fn investigate(&self, query: Query) -> Investigation {
-        Investigation::empty(query)
+        let context = SystemContext::detect();
+        let mut investigation = Investigation {
+            query: query.clone(),
+            answer: "No explanation available yet.".to_string(),
+            graph: EvidenceGraph::new(),
+            matches: Vec::new(),
+            incomplete: Vec::new(),
+            backend_status: Vec::new(),
+        };
+
+        let filesystem = FileSystemBackend::from_context(&context);
+        run_backend(&filesystem, &context, &query, &mut investigation);
+
+        investigation
+            .backend_status
+            .push(BackendStatus::new("nix", BackendState::NotImplemented));
+        investigation
+            .backend_status
+            .push(BackendStatus::new("procfs", BackendState::NotImplemented));
+        investigation
+            .backend_status
+            .push(BackendStatus::new("systemd", BackendState::NotImplemented));
+
+        if investigation.matches.is_empty() && investigation.incomplete.is_empty() {
+            investigation
+                .incomplete
+                .push("No backend has produced an explanation for this query.".to_string());
+        }
+
+        if !investigation.matches.is_empty() {
+            investigation.answer = match &investigation.query {
+                Query::Auto(_) => "Found an executable in PATH.".to_string(),
+                Query::File(_) => "Found the requested filesystem path.".to_string(),
+                _ => "Explanation available.".to_string(),
+            };
+        }
+
+        investigation
+    }
+}
+
+fn run_backend<B: Backend>(
+    backend: &B,
+    context: &SystemContext,
+    query: &Query,
+    investigation: &mut Investigation,
+) {
+    if !backend.detect(context) {
+        investigation.backend_status.push(BackendStatus::new(
+            backend.name(),
+            BackendState::Unavailable,
+        ));
+        return;
+    }
+
+    if !backend.supports(query) {
+        investigation
+            .backend_status
+            .push(BackendStatus::new(backend.name(), BackendState::NotUsed));
+        return;
+    }
+
+    match backend.investigate(query, &mut investigation.graph) {
+        Ok(output) => {
+            investigation.matches.extend(output.matches);
+            investigation.incomplete.extend(output.incomplete);
+            investigation
+                .backend_status
+                .push(BackendStatus::new(backend.name(), BackendState::Ok));
+        }
+        Err(BackendError::UnsupportedQuery) => {
+            investigation
+                .backend_status
+                .push(BackendStatus::new(backend.name(), BackendState::NotUsed));
+        }
+        Err(BackendError::NotImplemented) => {
+            investigation.backend_status.push(BackendStatus::new(
+                backend.name(),
+                BackendState::NotImplemented,
+            ));
+        }
+        Err(BackendError::Failed(message)) => {
+            investigation.backend_status.push(BackendStatus::new(
+                backend.name(),
+                BackendState::Error(message),
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::BackendState;
+    use crate::core::Query;
+    use crate::engine::Engine;
+
+    #[test]
+    fn unsupported_query_marks_filesystem_not_used() {
+        let investigation = Engine::new().investigate(Query::Package("firefox".to_string()));
+
+        let filesystem = investigation
+            .backend_status
+            .iter()
+            .find(|status| status.backend == "filesystem")
+            .unwrap();
+
+        assert_eq!(filesystem.state, BackendState::NotUsed);
+        assert!(investigation.matches.is_empty());
+    }
+
+    #[test]
+    fn missing_auto_query_reports_filesystem_incomplete() {
+        let investigation = Engine::new().investigate(Query::Auto(
+            "syswhy-definitely-not-a-real-executable-name".to_string(),
+        ));
+
+        assert!(investigation.matches.is_empty());
+        assert!(
+            investigation
+                .incomplete
+                .iter()
+                .any(|message| message.contains("could not find executable"))
+        );
     }
 }
