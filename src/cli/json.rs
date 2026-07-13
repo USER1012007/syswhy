@@ -13,6 +13,24 @@ pub fn render(investigation: &Investigation) -> String {
         json_string(&investigation.query.value())
     ));
     output.push_str("  },\n");
+    output.push_str(&format!(
+        "  \"answer\": {},\n",
+        json_string(&investigation.answer)
+    ));
+
+    output.push_str("  \"matches\": [");
+    if !investigation.matches.is_empty() {
+        output.push('\n');
+        for (index, entity_id) in investigation.matches.iter().enumerate() {
+            output.push_str(&format!("    {}", json_string(entity_id.as_str())));
+            if index + 1 != investigation.matches.len() {
+                output.push(',');
+            }
+            output.push('\n');
+        }
+        output.push_str("  ");
+    }
+    output.push_str("],\n");
 
     output.push_str("  \"entities\": [");
     if investigation.graph.entities().next().is_some() {
@@ -58,9 +76,39 @@ pub fn render(investigation: &Investigation) -> String {
                 json_string(relation.kind.as_str())
             ));
             output.push_str(&format!(
-                "      \"confidence\": {}\n",
+                "      \"confidence\": {},\n",
                 json_string(relation.confidence.as_str())
             ));
+            output.push_str("      \"evidence\": [");
+            if !relation.evidence.is_empty() {
+                output.push('\n');
+                for (evidence_index, evidence) in relation.evidence.iter().enumerate() {
+                    output.push_str("        {\n");
+                    output.push_str(&format!(
+                        "          \"backend\": {},\n",
+                        json_string(&evidence.backend)
+                    ));
+                    output.push_str(&format!(
+                        "          \"source\": {},\n",
+                        json_string(&evidence.source)
+                    ));
+                    output.push_str(&format!(
+                        "          \"description\": {},\n",
+                        json_string(&evidence.description)
+                    ));
+                    output.push_str(&format!(
+                        "          \"confidence\": {}\n",
+                        json_string(evidence.confidence.as_str())
+                    ));
+                    output.push_str("        }");
+                    if evidence_index + 1 != relation.evidence.len() {
+                        output.push(',');
+                    }
+                    output.push('\n');
+                }
+                output.push_str("      ");
+            }
+            output.push_str("]\n");
             output.push_str("    }");
             if index + 1 != relations.len() {
                 output.push(',');
