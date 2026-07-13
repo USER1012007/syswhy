@@ -1,4 +1,29 @@
-use crate::core::{EvidenceGraph, Query};
+pub mod filesystem;
+
+use crate::core::{EntityId, EvidenceGraph, Query};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackendOutput {
+    pub matches: Vec<EntityId>,
+    pub incomplete: Vec<String>,
+}
+
+impl BackendOutput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_match(mut self, entity_id: EntityId) -> Self {
+        self.matches.push(entity_id);
+        self
+    }
+
+    pub fn with_incomplete(mut self, message: impl Into<String>) -> Self {
+        self.incomplete.push(message.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendState {
     Ok,
@@ -66,5 +91,9 @@ pub trait Backend {
 
     fn supports(&self, query: &Query) -> bool;
 
-    fn investigate(&self, query: &Query, graph: &mut EvidenceGraph) -> Result<(), BackendError>;
+    fn investigate(
+        &self,
+        query: &Query,
+        graph: &mut EvidenceGraph,
+    ) -> Result<BackendOutput, BackendError>;
 }
