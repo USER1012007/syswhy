@@ -1,3 +1,4 @@
+use crate::core::Relation;
 use crate::engine::Investigation;
 
 pub fn render(investigation: &Investigation, include_evidence: bool) -> String {
@@ -14,11 +15,7 @@ pub fn render(investigation: &Investigation, include_evidence: bool) -> String {
     push_line(&mut output, "");
 
     push_line(&mut output, "Answer:");
-    if investigation.graph.is_empty() {
-        push_line(&mut output, "  No explanation available yet.");
-    } else {
-        push_line(&mut output, "  Explanation available.");
-    }
+    push_line(&mut output, &format!("  {}", investigation.answer));
 
     if !investigation.matches.is_empty() {
         push_line(&mut output, "");
@@ -106,14 +103,14 @@ fn render_entity(
         return;
     };
 
-    push_line(output, &format!("{}{}", indent(depth), entity.name));
+    if depth == 0 {
+        push_line(output, &entity.name);
+    } else {
+        push_line(output, &format!("{}└── {}", indent(depth), entity.name));
+    }
 
     for relation in investigation.graph.outgoing(entity_id) {
-        let marker = relation
-            .evidence
-            .first()
-            .map(|evidence| format!(" [e? {}]", evidence.confidence))
-            .unwrap_or_default();
+        let marker = evidence_marker(investigation, relation);
         push_line(
             output,
             &format!(
@@ -139,6 +136,27 @@ fn collect_evidence(investigation: &Investigation) -> Vec<(String, &crate::core:
     }
 
     evidence
+}
+
+fn evidence_marker(investigation: &Investigation, relation: &Relation) -> String {
+    if relation.evidence.is_empty() {
+        return String::new();
+    }
+
+    let mut index = 1;
+    for existing in investigation.graph.relations() {
+        for evidence in &existing.evidence {
+            if existing.from == relation.from
+                && existing.to == relation.to
+                && existing.kind == relation.kind
+            {
+                return format!(" [e{index} {}]", evidence.confidence);
+            }
+            index += 1;
+        }
+    }
+
+    String::new()
 }
 
 fn indent(depth: usize) -> String {
