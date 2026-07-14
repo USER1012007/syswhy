@@ -1,4 +1,5 @@
 pub mod filesystem;
+pub mod nix;
 
 use crate::core::{EntityId, EvidenceGraph, Query};
 
