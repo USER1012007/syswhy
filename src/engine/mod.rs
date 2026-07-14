@@ -1,4 +1,5 @@
 use crate::backend::filesystem::FileSystemBackend;
+use crate::backend::nix::NixBackend;
 use crate::backend::{Backend, BackendError, BackendState, BackendStatus, SystemContext};
 use crate::core::{EntityId, EvidenceGraph, Query};
 
@@ -52,9 +53,9 @@ impl Engine {
         let filesystem = FileSystemBackend::from_context(&context);
         run_backend(&filesystem, &context, &query, &mut investigation);
 
-        investigation
-            .backend_status
-            .push(BackendStatus::new("nix", BackendState::NotImplemented));
+        let nix = NixBackend::new();
+        run_backend(&nix, &context, &query, &mut investigation);
+
         investigation
             .backend_status
             .push(BackendStatus::new("procfs", BackendState::NotImplemented));
@@ -147,6 +148,22 @@ mod tests {
 
         assert_eq!(filesystem.state, BackendState::NotUsed);
         assert!(investigation.matches.is_empty());
+    }
+
+    #[test]
+    fn unsupported_query_still_runs_nix_as_graph_enricher_when_available() {
+        let investigation = Engine::new().investigate(Query::Package("firefox".to_string()));
+
+        let nix = investigation
+            .backend_status
+            .iter()
+            .find(|status| status.backend == "nix")
+            .unwrap();
+
+        assert!(matches!(
+            nix.state,
+            BackendState::Ok | BackendState::Unavailable
+        ));
     }
 
     #[test]
