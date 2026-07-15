@@ -1,5 +1,6 @@
 use crate::backend::filesystem::FileSystemBackend;
 use crate::backend::nix::NixBackend;
+use crate::backend::procfs::ProcfsBackend;
 use crate::backend::{Backend, BackendError, BackendState, BackendStatus, SystemContext};
 use crate::core::{EntityId, EvidenceGraph, Query};
 
@@ -53,12 +54,12 @@ impl Engine {
         let filesystem = FileSystemBackend::from_context(&context);
         run_backend(&filesystem, &context, &query, &mut investigation);
 
+        let procfs = ProcfsBackend::new();
+        run_backend(&procfs, &context, &query, &mut investigation);
+
         let nix = NixBackend::new();
         run_backend(&nix, &context, &query, &mut investigation);
 
-        investigation
-            .backend_status
-            .push(BackendStatus::new("procfs", BackendState::NotImplemented));
         investigation
             .backend_status
             .push(BackendStatus::new("systemd", BackendState::NotImplemented));
@@ -71,9 +72,10 @@ impl Engine {
 
         if !investigation.matches.is_empty() {
             investigation.answer = match &investigation.query {
-                Query::Auto(_) => "Found an executable in PATH.".to_string(),
-                Query::File(_) => "Found the requested filesystem path.".to_string(),
-                Query::StorePath(_) => "Found a Nix store path.".to_string(),
+                Query::Auto(_) => "Executable found in PATH.".to_string(),
+                Query::File(_) => "Path found.".to_string(),
+                Query::Process(_) => "Process found.".to_string(),
+                Query::StorePath(_) => "Nix store path found.".to_string(),
                 _ => "Explanation available.".to_string(),
             };
         }
@@ -165,6 +167,19 @@ mod tests {
             nix.state,
             BackendState::Ok | BackendState::Unavailable
         ));
+    }
+
+    #[test]
+    fn unsupported_query_marks_procfs_not_used() {
+        let investigation = Engine::new().investigate(Query::Package("firefox".to_string()));
+
+        let procfs = investigation
+            .backend_status
+            .iter()
+            .find(|status| status.backend == "procfs")
+            .unwrap();
+
+        assert_eq!(procfs.state, BackendState::NotUsed);
     }
 
     #[test]
