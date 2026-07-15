@@ -104,7 +104,7 @@ where
             }
         }
 
-        if enriched {
+        if enriched || !matches!(query, Query::StorePath(_)) {
             Ok(output)
         } else {
             Ok(
@@ -203,7 +203,15 @@ fn add_reachable_from_relation(
     root: String,
 ) -> Result<(), BackendError> {
     let root_id = EntityId::new(format!("file:{root}"));
-    graph.add_entity(Entity::new(root_id.clone(), EntityKind::File, root));
+    let root_label = root_label(&root);
+    let mut root_entity = Entity::new(root_id.clone(), EntityKind::File, root_label);
+    root_entity
+        .metadata
+        .insert("raw_path".to_string(), root.clone());
+    root_entity
+        .metadata
+        .insert("root_kind".to_string(), root_kind(&root).to_string());
+    graph.add_entity(root_entity);
     graph.add_relation(Relation::new(
         store_id,
         root_id,
@@ -218,6 +226,44 @@ fn add_reachable_from_relation(
     ));
 
     Ok(())
+}
+
+fn root_label(root: &str) -> String {
+    match root_kind(root) {
+        "current_system" => "current system".to_string(),
+        "system_profile" => "system profile".to_string(),
+        "direnv_profile" => direnv_profile_label(root),
+        "user_profile" => "user profile".to_string(),
+        "process_root" => "running process root".to_string(),
+        "gc_root" if root.contains("{censored}") => "GC root".to_string(),
+        "gc_root" if root.starts_with("/nix/var/nix/gcroots") => "Nix GC root".to_string(),
+        _ => root.to_string(),
+    }
+}
+
+fn root_kind(root: &str) -> &'static str {
+    if root == "/run/current-system" {
+        "current_system"
+    } else if root.starts_with("/nix/var/nix/profiles/system") {
+        "system_profile"
+    } else if root.contains("/.direnv/") {
+        "direnv_profile"
+    } else if root.contains("/.local/state/nix/profiles")
+        || root.contains("/.nix-profile")
+        || root.contains("/profiles/per-user/")
+    {
+        "user_profile"
+    } else if root.starts_with("/proc/") {
+        "process_root"
+    } else {
+        "gc_root"
+    }
+}
+
+fn direnv_profile_label(root: &str) -> String {
+    root.split_once("/.direnv/")
+        .map(|(project, _)| format!("direnv profile for {project}"))
+        .unwrap_or_else(|| "direnv profile".to_string())
 }
 
 fn parse_roots(stdout: &str) -> Vec<String> {
@@ -268,7 +314,7 @@ mod tests {
 
     use crate::backend::Backend;
     use crate::backend::command::{CommandError, CommandOutput, CommandRunner};
-    use crate::backend::nix::{NixBackend, containing_store_path, parse_roots};
+    use crate::backend::nix::{NixBackend, containing_store_path, parse_roots, root_label};
     use crate::core::{
         Confidence, Entity, EntityId, EntityKind, Evidence, EvidenceGraph, Query, Relation,
         RelationKind,
@@ -362,6 +408,16 @@ mod tests {
     }
 
     #[test]
+    fn labels_common_roots() {
+        assert_eq!(root_label("/run/current-system"), "current system");
+        assert_eq!(
+            root_label("/home/emilio/work/syswhy/.direnv/flake-profile-abc"),
+            "direnv profile for /home/emilio/work/syswhy"
+        );
+        assert_eq!(root_label("{censored}"), "GC root");
+    }
+
+    #[test]
     fn adds_reachable_from_relations_for_roots() {
         let mut graph = EvidenceGraph::new();
         graph.add_entity(Entity::new(
@@ -381,7 +437,7 @@ mod tests {
         assert_eq!(reachable_from.len(), 1);
         assert_eq!(
             graph.entity(&reachable_from[0].to).unwrap().name,
-            "/run/current-system"
+            "current system"
         );
     }
 
