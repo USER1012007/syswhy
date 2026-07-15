@@ -73,6 +73,7 @@ impl Engine {
             investigation.answer = match &investigation.query {
                 Query::Auto(_) => "Found an executable in PATH.".to_string(),
                 Query::File(_) => "Found the requested filesystem path.".to_string(),
+                Query::StorePath(_) => "Found a Nix store path.".to_string(),
                 _ => "Explanation available.".to_string(),
             };
         }
