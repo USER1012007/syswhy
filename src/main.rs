@@ -1,3 +1,4 @@
+use syswhy::cli::plain::PlainRenderMode;
 use syswhy::cli::{CliArgs, OutputMode, json, plain};
 use syswhy::engine::Engine;
 
@@ -14,10 +15,10 @@ fn main() {
     let investigation = Engine::new().investigate(args.query);
 
     let output = match output_mode {
-        OutputMode::Plain => plain::render(&investigation, false),
-        OutputMode::Evidence | OutputMode::Full | OutputMode::Debug => {
-            plain::render(&investigation, true)
-        }
+        OutputMode::Plain => plain::render(&investigation, PlainRenderMode::Compact),
+        OutputMode::Evidence => plain::render(&investigation, PlainRenderMode::Evidence),
+        OutputMode::Full => plain::render(&investigation, PlainRenderMode::Full),
+        OutputMode::Debug => plain::render(&investigation, PlainRenderMode::Debug),
         OutputMode::Json => json::render(&investigation),
     };
 
