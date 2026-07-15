@@ -1,6 +1,7 @@
 pub mod command;
 pub mod filesystem;
 pub mod nix;
+pub mod procfs;
 
 use crate::core::{EntityId, EvidenceGraph, Query};
 
