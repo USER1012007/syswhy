@@ -50,9 +50,24 @@ where
 
     fn investigate(
         &self,
-        _query: &Query,
+        query: &Query,
         graph: &mut EvidenceGraph,
     ) -> Result<BackendOutput, BackendError> {
+        let mut output = BackendOutput::new();
+        let mut enriched = false;
+
+        if let Query::StorePath(path) = query {
+            if let Some(match_id) = add_query_store_path(graph, path)? {
+                output.matches.push(match_id);
+                enriched = true;
+            } else {
+                output.incomplete.push(format!(
+                    "nix could not identify a containing store path for {}",
+                    path.display()
+                ));
+            }
+        }
+
         let path_entities: Vec<_> = graph
             .entities()
             .filter(|entity| matches!(entity.kind, EntityKind::File | EntityKind::Executable))
@@ -64,7 +79,6 @@ where
             .map(|entity| (entity.id.clone(), PathBuf::from(&entity.name)))
             .collect();
 
-        let mut enriched = false;
         for (entity_id, path) in path_entities {
             if let Some(store_path) = containing_store_path(&path) {
                 add_store_path_relation(graph, entity_id, store_path)?;
@@ -72,7 +86,6 @@ where
             }
         }
 
-        let mut output = BackendOutput::new();
         let store_paths: Vec<_> = graph
             .entities()
             .filter(|entity| entity.kind == EntityKind::StorePath)
@@ -100,6 +113,29 @@ where
             )
         }
     }
+}
+
+fn add_query_store_path(
+    graph: &mut EvidenceGraph,
+    query_path: &Path,
+) -> Result<Option<EntityId>, BackendError> {
+    let Some(store_path) = containing_store_path(query_path) else {
+        return Ok(None);
+    };
+
+    if query_path == store_path {
+        let store_path = display_path(&store_path)?;
+        let store_id = EntityId::new(format!("store-path:{store_path}"));
+        return Ok(Some(graph.add_entity(Entity::new(
+            store_id,
+            EntityKind::StorePath,
+            store_path,
+        ))));
+    }
+
+    let file_id = add_file_entity(graph, query_path, EntityKind::File)?;
+    add_store_path_relation(graph, file_id.clone(), store_path)?;
+    Ok(Some(file_id))
 }
 
 impl<R> NixBackend<R>
@@ -149,6 +185,16 @@ fn add_store_path_relation(
     ));
 
     Ok(())
+}
+
+fn add_file_entity(
+    graph: &mut EvidenceGraph,
+    path: &Path,
+    kind: EntityKind,
+) -> Result<EntityId, BackendError> {
+    let path = display_path(path)?;
+    let id = EntityId::new(format!("file:{path}"));
+    Ok(graph.add_entity(Entity::new(id, kind, path)))
 }
 
 fn add_reachable_from_relation(
@@ -336,6 +382,45 @@ mod tests {
         assert_eq!(
             graph.entity(&reachable_from[0].to).unwrap().name,
             "/run/current-system"
+        );
+    }
+
+    #[test]
+    fn direct_store_path_query_creates_store_path_match() {
+        let mut graph = EvidenceGraph::new();
+        let output = NixBackend::with_runner(FakeCommandRunner::stdout(""))
+            .investigate(
+                &Query::StorePath(Path::new("/nix/store/abc123-bash").to_path_buf()),
+                &mut graph,
+            )
+            .unwrap();
+
+        assert_eq!(output.matches.len(), 1);
+        assert_eq!(
+            graph.entity(&output.matches[0]).unwrap().kind,
+            EntityKind::StorePath
+        );
+    }
+
+    #[test]
+    fn direct_path_inside_store_creates_file_match_and_belongs_to_relation() {
+        let mut graph = EvidenceGraph::new();
+        let output = NixBackend::with_runner(FakeCommandRunner::stdout(""))
+            .investigate(
+                &Query::StorePath(Path::new("/nix/store/abc123-bash/bin/bash").to_path_buf()),
+                &mut graph,
+            )
+            .unwrap();
+
+        assert_eq!(output.matches.len(), 1);
+        assert_eq!(
+            graph.entity(&output.matches[0]).unwrap().kind,
+            EntityKind::File
+        );
+        assert!(
+            graph
+                .relations()
+                .any(|relation| relation.kind == RelationKind::BelongsTo)
         );
     }
 
