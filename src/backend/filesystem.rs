@@ -68,6 +68,35 @@ impl FileSystemBackend {
 
         Ok(BackendOutput::new().with_match(entity_id))
     }
+
+    fn enrich_existing_paths(&self, graph: &mut EvidenceGraph) -> BackendOutput {
+        let path_entities = graph
+            .entities()
+            .filter(|entity| matches!(entity.kind, EntityKind::File | EntityKind::Executable))
+            .filter(|entity| {
+                !graph
+                    .outgoing(&entity.id)
+                    .any(|relation| relation.kind == RelationKind::ResolvesTo)
+            })
+            .map(|entity| (entity.id.clone(), PathBuf::from(&entity.name)))
+            .collect::<Vec<_>>();
+
+        let mut output = BackendOutput::new();
+        for (entity_id, path) in path_entities {
+            if !path.exists() {
+                continue;
+            }
+
+            if let Err(error) = add_canonical_relation(graph, &entity_id, &path) {
+                output.incomplete.push(format!(
+                    "filesystem could not resolve {}: {error:?}",
+                    path.display()
+                ));
+            }
+        }
+
+        output
+    }
 }
 
 impl Backend for FileSystemBackend {
@@ -80,7 +109,10 @@ impl Backend for FileSystemBackend {
     }
 
     fn supports(&self, query: &Query) -> bool {
-        matches!(query, Query::Auto(_) | Query::File(_))
+        matches!(
+            query,
+            Query::Auto(_) | Query::File(_) | Query::Process(_) | Query::Service(_)
+        )
     }
 
     fn investigate(
@@ -91,6 +123,7 @@ impl Backend for FileSystemBackend {
         match query {
             Query::Auto(name) => self.investigate_auto(name, graph),
             Query::File(path) => self.investigate_file(path, graph),
+            Query::Process(_) | Query::Service(_) => Ok(self.enrich_existing_paths(graph)),
             _ => Err(BackendError::UnsupportedQuery),
         }
     }
@@ -176,7 +209,7 @@ mod tests {
 
     use crate::backend::Backend;
     use crate::backend::filesystem::FileSystemBackend;
-    use crate::core::{EvidenceGraph, Query, RelationKind};
+    use crate::core::{Entity, EntityId, EntityKind, EvidenceGraph, Query, RelationKind};
 
     #[test]
     fn auto_query_finds_executable_in_path() {
@@ -208,6 +241,34 @@ mod tests {
         let output = backend.investigate(&Query::File(link), &mut graph).unwrap();
 
         assert_eq!(output.matches.len(), 1);
+        assert_eq!(graph.relation_count(), 1);
+        assert_eq!(
+            graph.relations().next().unwrap().kind,
+            RelationKind::ResolvesTo
+        );
+    }
+
+    #[test]
+    fn service_query_enriches_existing_file_entities() {
+        let fixture = TempFixture::new();
+        let target = fixture.path.join("target.service");
+        let link = fixture.path.join("linked.service");
+        fs::write(&target, "[Service]\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let backend = FileSystemBackend::with_path_env("");
+        let mut graph = EvidenceGraph::new();
+        graph.add_entity(Entity::new(
+            EntityId::new(format!("file:{}", link.display())),
+            EntityKind::File,
+            link.display().to_string(),
+        ));
+
+        let output = backend
+            .investigate(&Query::Service("linked".to_string()), &mut graph)
+            .unwrap();
+
+        assert!(output.matches.is_empty());
         assert_eq!(graph.relation_count(), 1);
         assert_eq!(
             graph.relations().next().unwrap().kind,
