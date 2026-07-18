@@ -15,7 +15,15 @@ impl EvidenceGraph {
 
     pub fn add_entity(&mut self, entity: Entity) -> EntityId {
         let id = entity.id.clone();
-        self.entities.entry(id.clone()).or_insert(entity);
+        self.entities
+            .entry(id.clone())
+            .and_modify(|existing| {
+                if existing.name.starts_with("PID ") && !entity.name.starts_with("PID ") {
+                    existing.name = entity.name.clone();
+                }
+                existing.metadata.extend(entity.metadata.clone());
+            })
+            .or_insert(entity);
         id
     }
 
@@ -95,6 +103,23 @@ mod tests {
         graph.add_entity(entity);
 
         assert_eq!(graph.entity_count(), 1);
+    }
+
+    #[test]
+    fn adding_same_entity_merges_metadata_and_improves_placeholder_name() {
+        let mut graph = EvidenceGraph::new();
+        let id = EntityId::new("process:42");
+        graph.add_entity(Entity::new(id.clone(), EntityKind::Process, "PID 42"));
+
+        let mut enriched = Entity::new(id.clone(), EntityKind::Process, "demo (42)");
+        enriched
+            .metadata
+            .insert("cmdline".to_string(), "demo --flag".to_string());
+        graph.add_entity(enriched);
+
+        let entity = graph.entity(&id).unwrap();
+        assert_eq!(entity.name, "demo (42)");
+        assert_eq!(entity.metadata.get("cmdline").unwrap(), "demo --flag");
     }
 
     #[test]
