@@ -37,6 +37,24 @@ The first implementation language is **Rust**.
 
 The main interactive interface is a **TUI built with Ratatui**.
 
+The TUI may live in a separate repository and depend on `syswhy` as a library.
+This crate should remain the source of truth for queries, backend execution,
+evidence graphs, and non-interactive renderers.
+
+Minimal library usage:
+
+```rust
+use syswhy::prelude::*;
+
+fn main() -> Result<(), SyswhyError> {
+    let query = Query::Service("dbus".to_string());
+    let investigation = Engine::new().investigate(query);
+
+    println!("{}", render_plain(&investigation, PlainRenderMode::Compact));
+    Ok(())
+}
+```
+
 ---
 
 ## 2. Product vision
