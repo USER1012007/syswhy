@@ -40,6 +40,23 @@ impl ProcfsBackend {
         let process_id = add_process_entity(graph, pid, &process_dir);
         let mut output = BackendOutput::new().with_match(process_id.clone());
 
+        if let Some(parent_pid) = read_parent_pid(&process_dir) {
+            let parent_dir = self.proc_root.join(parent_pid.to_string());
+            let parent_id = add_process_entity(graph, parent_pid, &parent_dir);
+            graph.add_relation(Relation::new(
+                process_id.clone(),
+                parent_id,
+                RelationKind::StartedBy,
+                Confidence::Exact,
+                vec![Evidence::new(
+                    "procfs",
+                    format!("/proc/{pid}/status"),
+                    "Process status reports this parent PID",
+                    Confidence::Exact,
+                )],
+            ));
+        }
+
         match fs::read_link(process_dir.join("exe")) {
             Ok(exe_path) => {
                 let exe_id = add_file_entity(graph, &exe_path, EntityKind::Executable)?;
@@ -124,6 +141,15 @@ fn add_process_entity(graph: &mut EvidenceGraph, pid: u32, process_dir: &Path) -
     graph.add_entity(entity)
 }
 
+fn read_parent_pid(process_dir: &Path) -> Option<u32> {
+    let status = fs::read_to_string(process_dir.join("status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("PPid:")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|pid| *pid != 0)
+    })
+}
+
 fn add_file_entity(
     graph: &mut EvidenceGraph,
     path: &Path,
@@ -156,7 +182,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::backend::Backend;
-    use crate::backend::procfs::{ProcfsBackend, format_cmdline};
+    use crate::backend::procfs::{ProcfsBackend, format_cmdline, read_parent_pid};
     use crate::core::{EntityKind, EvidenceGraph, Query, RelationKind};
 
     #[test]
@@ -171,6 +197,10 @@ mod tests {
         fs::create_dir(&proc_dir).unwrap();
         fs::write(proc_dir.join("comm"), "demo\n").unwrap();
         fs::write(proc_dir.join("cmdline"), b"demo\0--flag\0").unwrap();
+        fs::write(proc_dir.join("status"), "Name:\tdemo\nPPid:\t7\n").unwrap();
+        let parent_dir = fixture.path.join("7");
+        fs::create_dir(&parent_dir).unwrap();
+        fs::write(parent_dir.join("comm"), "parent\n").unwrap();
         let exe = fixture.path.join("bin-demo");
         fs::write(&exe, "").unwrap();
         std::os::unix::fs::symlink(&exe, proc_dir.join("exe")).unwrap();
@@ -191,6 +221,19 @@ mod tests {
                 .relations()
                 .any(|relation| relation.kind == RelationKind::Uses)
         );
+        assert!(
+            graph
+                .relations()
+                .any(|relation| relation.kind == RelationKind::StartedBy)
+        );
+    }
+
+    #[test]
+    fn reads_parent_pid_from_status() {
+        let fixture = TempFixture::new();
+        fs::write(fixture.path.join("status"), "Name:\tdemo\nPPid:\t123\n").unwrap();
+
+        assert_eq!(read_parent_pid(&fixture.path), Some(123));
     }
 
     struct TempFixture {
