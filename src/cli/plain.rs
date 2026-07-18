@@ -165,6 +165,9 @@ fn render_graph_details(output: &mut String, investigation: &Investigation, colo
                 entity.name
             ),
         );
+        for (key, value) in &entity.metadata {
+            push_line(output, &format!("      {key}: {value}"));
+        }
     }
 
     push_line(output, "  Relations:");
