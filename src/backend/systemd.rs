@@ -68,6 +68,7 @@ where
         let service_id = add_service_entity(graph, &unit, &properties);
         add_fragment_relation(graph, &service_id, &unit, &properties)?;
         add_main_pid_relation(graph, &service_id, &unit, &properties);
+        add_dependency_relations(graph, &service_id, &unit, &properties);
 
         Ok(BackendOutput::new().with_match(service_id))
     }
@@ -91,6 +92,10 @@ where
                     "--property=SubState",
                     "--property=FragmentPath",
                     "--property=MainPID",
+                    "--property=Requires",
+                    "--property=RequiredBy",
+                    "--property=Wants",
+                    "--property=WantedBy",
                 ],
             )
             .map_err(|error| BackendError::Failed(format!("systemctl show failed: {error:?}")))?;
@@ -192,6 +197,92 @@ fn add_main_pid_relation(
     ));
 }
 
+fn add_dependency_relations(
+    graph: &mut EvidenceGraph,
+    service_id: &EntityId,
+    unit: &str,
+    properties: &BTreeMap<String, String>,
+) {
+    add_unit_list_relations(
+        graph,
+        service_id,
+        unit,
+        properties,
+        "Requires",
+        RelationKind::Requires,
+        Direction::Outgoing,
+    );
+    add_unit_list_relations(
+        graph,
+        service_id,
+        unit,
+        properties,
+        "RequiredBy",
+        RelationKind::Requires,
+        Direction::Incoming,
+    );
+    add_unit_list_relations(
+        graph,
+        service_id,
+        unit,
+        properties,
+        "Wants",
+        RelationKind::References,
+        Direction::Outgoing,
+    );
+    add_unit_list_relations(
+        graph,
+        service_id,
+        unit,
+        properties,
+        "WantedBy",
+        RelationKind::References,
+        Direction::Incoming,
+    );
+}
+
+fn add_unit_list_relations(
+    graph: &mut EvidenceGraph,
+    service_id: &EntityId,
+    unit: &str,
+    properties: &BTreeMap<String, String>,
+    property: &str,
+    relation_kind: RelationKind,
+    direction: Direction,
+) {
+    for related_unit in unit_list(properties, property) {
+        let related_id = add_unit_entity(graph, &related_unit);
+        let (from, to) = match direction {
+            Direction::Outgoing => (service_id.clone(), related_id),
+            Direction::Incoming => (related_id, service_id.clone()),
+        };
+
+        graph.add_relation(Relation::new(
+            from,
+            to,
+            relation_kind.clone(),
+            Confidence::Exact,
+            vec![Evidence::new(
+                "systemd",
+                format!("systemctl show {unit} --property={property}"),
+                format!("systemd reports this {property} unit relationship"),
+                Confidence::Exact,
+            )],
+        ));
+    }
+}
+
+fn add_unit_entity(graph: &mut EvidenceGraph, unit: &str) -> EntityId {
+    let id = EntityId::new(format!("service:systemd:{unit}"));
+    let mut entity = Entity::new(id.clone(), EntityKind::Service, unit);
+    if let Some((_, unit_kind)) = unit.rsplit_once('.') {
+        entity
+            .metadata
+            .insert("unit_kind".to_string(), unit_kind.to_string());
+    }
+    graph.add_entity(entity)
+}
+
 fn add_file_entity(graph: &mut EvidenceGraph, path: &Path) -> Result<EntityId, BackendError> {
     if path.as_os_str().is_empty() {
         return Err(BackendError::Failed(
@@ -210,6 +301,13 @@ fn parse_show_output(stdout: &str) -> BTreeMap<String, String> {
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect()
+}
+
+fn unit_list(properties: &BTreeMap<String, String>, property: &str) -> Vec<String> {
+    properties
+        .get(property)
+        .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
+        .unwrap_or_default()
 }
 
 fn normalize_unit_name(service: &str) -> String {
@@ -239,11 +337,19 @@ fn to_metadata_key(key: &str) -> String {
     result
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Outgoing,
+    Incoming,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
     use crate::backend::command::{CommandError, CommandOutput, CommandRunner};
-    use crate::backend::systemd::{SystemdBackend, normalize_unit_name, parse_show_output};
+    use crate::backend::systemd::{
+        SystemdBackend, normalize_unit_name, parse_show_output, unit_list,
+    };
     use crate::core::{EntityKind, EvidenceGraph, Query, RelationKind};
 
     #[test]
@@ -254,6 +360,16 @@ mod tests {
 
         assert_eq!(properties.get("Id").unwrap(), "bluetooth.service");
         assert_eq!(properties.get("MainPID").unwrap(), "42");
+    }
+
+    #[test]
+    fn parses_space_separated_unit_lists() {
+        let properties = parse_show_output("Requires=sysinit.target system.slice dbus.socket\n");
+
+        assert_eq!(
+            unit_list(&properties, "Requires"),
+            vec!["sysinit.target", "system.slice", "dbus.socket"]
+        );
     }
 
     #[test]
@@ -271,6 +387,10 @@ ActiveState=active
 SubState=running
 FragmentPath=/nix/store/abc-unit/bluetooth.service
 MainPID=42
+Requires=sysinit.target system.slice
+RequiredBy=bluetooth.target
+Wants=dbus.socket
+WantedBy=multi-user.target
 ";
         let backend = SystemdBackend::with_runner(FakeCommandRunner::stdout(stdout));
         let mut graph = EvidenceGraph::new();
@@ -292,6 +412,16 @@ MainPID=42
             graph
                 .relations()
                 .any(|relation| relation.kind == RelationKind::Uses)
+        );
+        assert!(
+            graph
+                .relations()
+                .any(|relation| relation.kind == RelationKind::Requires)
+        );
+        assert!(
+            graph
+                .relations()
+                .any(|relation| relation.kind == RelationKind::References)
         );
     }
 
