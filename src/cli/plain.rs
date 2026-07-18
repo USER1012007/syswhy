@@ -52,7 +52,7 @@ pub fn render_with_color(
     if !investigation.graph.is_empty() {
         push_section(&mut output, "Why", color);
         for entity_id in why_roots(investigation) {
-            render_entity(&mut output, investigation, &entity_id, color);
+            render_entity(&mut output, investigation, &entity_id, mode, color);
         }
     }
 
@@ -100,6 +100,10 @@ pub fn render_with_color(
 }
 
 impl PlainRenderMode {
+    fn simplifies_graph(self) -> bool {
+        matches!(self, Self::Compact | Self::Evidence)
+    }
+
     fn includes_evidence(self) -> bool {
         matches!(self, Self::Evidence | Self::Full | Self::Debug)
     }
@@ -211,6 +215,7 @@ fn render_entity(
     output: &mut String,
     investigation: &Investigation,
     entity_id: &EntityId,
+    mode: PlainRenderMode,
     color: bool,
 ) {
     let Some(entity) = investigation.graph.entity(entity_id) else {
@@ -218,7 +223,7 @@ fn render_entity(
     };
 
     push_line(output, &entity.name);
-    render_children(output, investigation, entity_id, "", color);
+    render_children(output, investigation, entity_id, "", mode, color);
 }
 
 fn render_children(
@@ -226,9 +231,10 @@ fn render_children(
     investigation: &Investigation,
     entity_id: &EntityId,
     prefix: &str,
+    mode: PlainRenderMode,
     color: bool,
 ) {
-    let items = render_items(investigation, entity_id);
+    let items = render_items(investigation, entity_id, mode);
 
     for (index, item) in items.iter().enumerate() {
         let is_last = index + 1 == items.len();
@@ -252,6 +258,7 @@ fn render_children(
             investigation,
             &item.to,
             &format!("{prefix}{child_prefix}"),
+            mode,
             color,
         );
     }
@@ -296,12 +303,23 @@ fn dedup_entity_ids(ids: impl IntoIterator<Item = EntityId>) -> Vec<EntityId> {
     result
 }
 
-fn render_items(investigation: &Investigation, entity_id: &EntityId) -> Vec<RenderItem> {
+fn render_items(
+    investigation: &Investigation,
+    entity_id: &EntityId,
+    mode: PlainRenderMode,
+) -> Vec<RenderItem> {
     let mut items = Vec::new();
 
     for relation in investigation.graph.outgoing(entity_id) {
-        let target_label = relation_target_label(investigation, relation);
-        let can_group = investigation.graph.outgoing(&relation.to).next().is_none();
+        let compact_systemd_unit =
+            mode.simplifies_graph() && is_low_signal_systemd_unit(investigation, relation);
+        let target_label = if compact_systemd_unit {
+            "systemd base units".to_string()
+        } else {
+            relation_target_label(investigation, relation)
+        };
+        let can_group =
+            compact_systemd_unit || investigation.graph.outgoing(&relation.to).next().is_none();
 
         let existing_index = can_group
             .then(|| {
@@ -343,6 +361,41 @@ fn relation_target_label(investigation: &Investigation, relation: &Relation) -> 
         .entity(&relation.to)
         .map(|entity| entity.name.clone())
         .unwrap_or_else(|| relation.to.to_string())
+}
+
+fn is_low_signal_systemd_unit(investigation: &Investigation, relation: &Relation) -> bool {
+    if !matches!(
+        relation.kind,
+        RelationKind::Requires | RelationKind::References
+    ) {
+        return false;
+    }
+
+    if !relation
+        .evidence
+        .iter()
+        .any(|evidence| evidence.backend == "systemd")
+    {
+        return false;
+    }
+
+    let Some(entity) = investigation.graph.entity(&relation.to) else {
+        return false;
+    };
+
+    matches!(
+        entity.name.as_str(),
+        "-.mount"
+            | "basic.target"
+            | "init.scope"
+            | "local-fs.target"
+            | "paths.target"
+            | "shutdown.target"
+            | "slices.target"
+            | "sockets.target"
+            | "sysinit.target"
+            | "system.slice"
+    )
 }
 
 struct EvidenceEntry<'a> {
@@ -571,6 +624,27 @@ mod tests {
     }
 
     #[test]
+    fn compact_graph_groups_low_signal_systemd_units() {
+        let investigation = investigation_with_systemd_dependencies();
+        let output = plain::render(&investigation, plain::PlainRenderMode::Compact);
+
+        assert!(output.contains("requires dbus.socket"));
+        assert!(output.contains("requires systemd base units (2)"));
+        assert!(!output.contains("requires system.slice"));
+        assert!(!output.contains("requires -.mount"));
+    }
+
+    #[test]
+    fn full_graph_keeps_low_signal_systemd_units() {
+        let investigation = investigation_with_systemd_dependencies();
+        let output = plain::render(&investigation, plain::PlainRenderMode::Full);
+
+        assert!(output.contains("requires dbus.socket"));
+        assert!(output.contains("requires system.slice"));
+        assert!(output.contains("requires -.mount"));
+    }
+
+    #[test]
     fn full_mode_renders_graph_details() {
         let investigation = investigation_with_one_relation();
         let output = plain::render(&investigation, plain::PlainRenderMode::Full);
@@ -622,6 +696,44 @@ mod tests {
             answer: "Found an executable in PATH.".to_string(),
             graph,
             matches: vec![from],
+            incomplete: Vec::new(),
+            backend_status: Vec::new(),
+        }
+    }
+
+    fn investigation_with_systemd_dependencies() -> Investigation {
+        let mut graph = EvidenceGraph::new();
+        let service = graph.add_entity(Entity::new(
+            EntityId::new("service:systemd:dbus.service"),
+            EntityKind::Service,
+            "dbus.service",
+        ));
+
+        for dependency in ["dbus.socket", "system.slice", "-.mount"] {
+            let dependency_id = graph.add_entity(Entity::new(
+                EntityId::new(format!("service:systemd:{dependency}")),
+                EntityKind::Service,
+                dependency,
+            ));
+            graph.add_relation(Relation::new(
+                service.clone(),
+                dependency_id,
+                RelationKind::Requires,
+                Confidence::Exact,
+                vec![Evidence::new(
+                    "systemd",
+                    "systemctl show dbus.service --property=Requires",
+                    "systemd reports this Requires unit relationship",
+                    Confidence::Exact,
+                )],
+            ));
+        }
+
+        Investigation {
+            query: Query::Service("dbus".to_string()),
+            answer: "Service found.".to_string(),
+            graph,
+            matches: vec![service],
             incomplete: Vec::new(),
             backend_status: Vec::new(),
         }
