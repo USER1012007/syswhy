@@ -1,6 +1,7 @@
 use crate::backend::filesystem::FileSystemBackend;
 use crate::backend::nix::NixBackend;
 use crate::backend::procfs::ProcfsBackend;
+use crate::backend::systemd::SystemdBackend;
 use crate::backend::{Backend, BackendError, BackendState, BackendStatus, SystemContext};
 use crate::core::{EntityId, EvidenceGraph, Query};
 
@@ -54,15 +55,14 @@ impl Engine {
         let filesystem = FileSystemBackend::from_context(&context);
         run_backend(&filesystem, &context, &query, &mut investigation);
 
+        let systemd = SystemdBackend::new();
+        run_backend(&systemd, &context, &query, &mut investigation);
+
         let procfs = ProcfsBackend::new();
         run_backend(&procfs, &context, &query, &mut investigation);
 
         let nix = NixBackend::new();
         run_backend(&nix, &context, &query, &mut investigation);
-
-        investigation
-            .backend_status
-            .push(BackendStatus::new("systemd", BackendState::NotImplemented));
 
         if investigation.matches.is_empty() && investigation.incomplete.is_empty() {
             investigation
@@ -75,6 +75,7 @@ impl Engine {
                 Query::Auto(_) => "Executable found in PATH.".to_string(),
                 Query::File(_) => "Path found.".to_string(),
                 Query::Process(_) => "Process found.".to_string(),
+                Query::Service(_) => "Service found.".to_string(),
                 Query::StorePath(_) => "Nix store path found.".to_string(),
                 _ => "Explanation available.".to_string(),
             };
@@ -170,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_query_marks_procfs_not_used() {
+    fn unsupported_query_allows_procfs_enrichment() {
         let investigation = Engine::new().investigate(Query::Package("firefox".to_string()));
 
         let procfs = investigation
@@ -179,7 +180,26 @@ mod tests {
             .find(|status| status.backend == "procfs")
             .unwrap();
 
-        assert_eq!(procfs.state, BackendState::NotUsed);
+        assert!(matches!(
+            procfs.state,
+            BackendState::Ok | BackendState::Unavailable
+        ));
+    }
+
+    #[test]
+    fn unsupported_query_marks_systemd_not_used() {
+        let investigation = Engine::new().investigate(Query::Package("firefox".to_string()));
+
+        let systemd = investigation
+            .backend_status
+            .iter()
+            .find(|status| status.backend == "systemd")
+            .unwrap();
+
+        assert!(matches!(
+            systemd.state,
+            BackendState::NotUsed | BackendState::Unavailable
+        ));
     }
 
     #[test]
