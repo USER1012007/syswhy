@@ -52,14 +52,14 @@ impl Engine {
             backend_status: Vec::new(),
         };
 
-        let filesystem = FileSystemBackend::from_context(&context);
-        run_backend(&filesystem, &context, &query, &mut investigation);
-
         let systemd = SystemdBackend::new();
         run_backend(&systemd, &context, &query, &mut investigation);
 
         let procfs = ProcfsBackend::new();
         run_backend(&procfs, &context, &query, &mut investigation);
+
+        let filesystem = FileSystemBackend::from_context(&context);
+        run_backend(&filesystem, &context, &query, &mut investigation);
 
         let nix = NixBackend::new();
         run_backend(&nix, &context, &query, &mut investigation);
