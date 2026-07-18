@@ -29,6 +29,7 @@ impl ProcfsBackend {
         &self,
         pid: u32,
         graph: &mut EvidenceGraph,
+        include_match: bool,
     ) -> Result<BackendOutput, BackendError> {
         let process_dir = self.proc_root.join(pid.to_string());
         if !process_dir.exists() {
@@ -38,7 +39,10 @@ impl ProcfsBackend {
         }
 
         let process_id = add_process_entity(graph, pid, &process_dir);
-        let mut output = BackendOutput::new().with_match(process_id.clone());
+        let mut output = BackendOutput::new();
+        if include_match {
+            output.matches.push(process_id.clone());
+        }
 
         if let Some(parent_pid) = read_parent_pid(&process_dir) {
             let parent_dir = self.proc_root.join(parent_pid.to_string());
@@ -97,8 +101,8 @@ impl Backend for ProcfsBackend {
         self.proc_root.exists()
     }
 
-    fn supports(&self, query: &Query) -> bool {
-        matches!(query, Query::Process(_))
+    fn supports(&self, _query: &Query) -> bool {
+        true
     }
 
     fn investigate(
@@ -107,9 +111,30 @@ impl Backend for ProcfsBackend {
         graph: &mut EvidenceGraph,
     ) -> Result<BackendOutput, BackendError> {
         match query {
-            Query::Process(pid) => self.investigate_pid(*pid, graph),
-            _ => Err(BackendError::UnsupportedQuery),
+            Query::Process(pid) => self.investigate_pid(*pid, graph, true),
+            _ => self.enrich_existing_processes(graph),
         }
+    }
+}
+
+impl ProcfsBackend {
+    fn enrich_existing_processes(
+        &self,
+        graph: &mut EvidenceGraph,
+    ) -> Result<BackendOutput, BackendError> {
+        let pids = graph
+            .entities()
+            .filter(|entity| entity.kind == EntityKind::Process)
+            .filter_map(|entity| parse_process_id(&entity.id))
+            .collect::<Vec<_>>();
+
+        let mut output = BackendOutput::new();
+        for pid in pids {
+            let pid_output = self.investigate_pid(pid, graph, false)?;
+            output.incomplete.extend(pid_output.incomplete);
+        }
+
+        Ok(output)
     }
 }
 
@@ -150,6 +175,10 @@ fn read_parent_pid(process_dir: &Path) -> Option<u32> {
     })
 }
 
+fn parse_process_id(entity_id: &EntityId) -> Option<u32> {
+    entity_id.as_str().strip_prefix("process:")?.parse().ok()
+}
+
 fn add_file_entity(
     graph: &mut EvidenceGraph,
     path: &Path,
@@ -183,7 +212,7 @@ mod tests {
 
     use crate::backend::Backend;
     use crate::backend::procfs::{ProcfsBackend, format_cmdline, read_parent_pid};
-    use crate::core::{EntityKind, EvidenceGraph, Query, RelationKind};
+    use crate::core::{Entity, EntityId, EntityKind, EvidenceGraph, Query, RelationKind};
 
     #[test]
     fn formats_nul_separated_cmdline() {
@@ -234,6 +263,36 @@ mod tests {
         fs::write(fixture.path.join("status"), "Name:\tdemo\nPPid:\t123\n").unwrap();
 
         assert_eq!(read_parent_pid(&fixture.path), Some(123));
+    }
+
+    #[test]
+    fn enriches_existing_process_without_adding_match() {
+        let fixture = TempFixture::new();
+        let proc_dir = fixture.path.join("42");
+        fs::create_dir(&proc_dir).unwrap();
+        fs::write(proc_dir.join("comm"), "demo\n").unwrap();
+        let exe = fixture.path.join("bin-demo");
+        fs::write(&exe, "").unwrap();
+        std::os::unix::fs::symlink(&exe, proc_dir.join("exe")).unwrap();
+
+        let backend = ProcfsBackend::with_proc_root(&fixture.path);
+        let mut graph = EvidenceGraph::new();
+        graph.add_entity(Entity::new(
+            EntityId::new("process:42"),
+            EntityKind::Process,
+            "PID 42",
+        ));
+
+        let output = backend
+            .investigate(&Query::Service("demo".to_string()), &mut graph)
+            .unwrap();
+
+        assert!(output.matches.is_empty());
+        assert!(
+            graph
+                .relations()
+                .any(|relation| relation.kind == RelationKind::Uses)
+        );
     }
 
     struct TempFixture {
