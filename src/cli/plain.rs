@@ -1,4 +1,4 @@
-use crate::core::{Evidence, Relation};
+use crate::core::{Confidence, EntityId, Evidence, Relation, RelationKind};
 use crate::engine::Investigation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +51,8 @@ pub fn render_with_color(
 
     if !investigation.graph.is_empty() {
         push_section(&mut output, "Why", color);
-        for entity in investigation.graph.entities() {
-            if investigation.graph.incoming(&entity.id).next().is_none() {
-                render_entity(&mut output, investigation, &entity.id, 0, color);
-            }
+        for entity_id in why_roots(investigation) {
+            render_entity(&mut output, investigation, &entity_id, color);
         }
     }
 
@@ -212,43 +210,139 @@ fn render_debug(output: &mut String, investigation: &Investigation, color: bool)
 fn render_entity(
     output: &mut String,
     investigation: &Investigation,
-    entity_id: &crate::core::EntityId,
-    depth: usize,
+    entity_id: &EntityId,
     color: bool,
 ) {
     let Some(entity) = investigation.graph.entity(entity_id) else {
         return;
     };
 
-    if depth == 0 {
-        push_line(output, &entity.name);
-    } else {
+    push_line(output, &entity.name);
+    render_children(output, investigation, entity_id, "", color);
+}
+
+fn render_children(
+    output: &mut String,
+    investigation: &Investigation,
+    entity_id: &EntityId,
+    prefix: &str,
+    color: bool,
+) {
+    let items = render_items(investigation, entity_id);
+
+    for (index, item) in items.iter().enumerate() {
+        let is_last = index + 1 == items.len();
+        let branch = if is_last { "└──" } else { "├──" };
+        let child_prefix = if is_last { "    " } else { "│   " };
+        let marker = evidence_marker(&item.evidence);
+        let marker = styled(&marker, "90", color);
+        let target = styled(&item.target_label, "97", color);
         push_line(
             output,
             &format!(
-                "{} {} {}",
-                indent(depth),
-                styled("└──", "96", color),
-                styled(&entity.name, "95", color)
+                "{prefix}{} {} {}{}",
+                styled(branch, "90", color),
+                item.kind.label(),
+                target,
+                marker,
             ),
         );
+        render_children(
+            output,
+            investigation,
+            &item.to,
+            &format!("{prefix}{child_prefix}"),
+            color,
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RenderItem {
+    to: EntityId,
+    kind: RelationKind,
+    target_label: String,
+    evidence: Vec<EvidenceRef>,
+    target_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EvidenceRef {
+    id: String,
+    confidence: Confidence,
+}
+
+fn why_roots(investigation: &Investigation) -> Vec<EntityId> {
+    if !investigation.matches.is_empty() {
+        return dedup_entity_ids(investigation.matches.iter().cloned());
     }
 
-    for relation in investigation.graph.outgoing(entity_id) {
-        let marker = evidence_marker(investigation, relation);
-        let marker = styled(&marker, "93", color);
-        push_line(
-            output,
-            &format!(
-                "{}{} {}{}",
-                indent(depth + 1),
-                styled("└──", "96", color),
-                relation.kind.label(),
-                marker
-            ),
-        );
-        render_entity(output, investigation, &relation.to, depth + 2, color);
+    dedup_entity_ids(
+        investigation
+            .graph
+            .entities()
+            .filter(|entity| investigation.graph.incoming(&entity.id).next().is_none())
+            .map(|entity| entity.id.clone()),
+    )
+}
+
+fn dedup_entity_ids(ids: impl IntoIterator<Item = EntityId>) -> Vec<EntityId> {
+    let mut result = Vec::new();
+    for id in ids {
+        if !result.contains(&id) {
+            result.push(id);
+        }
     }
+    result
+}
+
+fn render_items(investigation: &Investigation, entity_id: &EntityId) -> Vec<RenderItem> {
+    let mut items = Vec::new();
+
+    for relation in investigation.graph.outgoing(entity_id) {
+        let target_label = relation_target_label(investigation, relation);
+        let can_group = investigation.graph.outgoing(&relation.to).next().is_none();
+
+        let existing_index = can_group
+            .then(|| {
+                items.iter().position(|item: &RenderItem| {
+                    item.kind == relation.kind && item.target_label == target_label
+                })
+            })
+            .flatten();
+
+        if let Some(existing_index) = existing_index {
+            items[existing_index]
+                .evidence
+                .extend(evidence_refs(investigation, relation));
+            items[existing_index].target_count += 1;
+            continue;
+        }
+
+        items.push(RenderItem {
+            to: relation.to.clone(),
+            kind: relation.kind.clone(),
+            target_label,
+            evidence: evidence_refs(investigation, relation),
+            target_count: 1,
+        });
+    }
+
+    for item in &mut items {
+        if item.target_count > 1 && investigation.graph.outgoing(&item.to).next().is_none() {
+            item.target_label = format!("{} ({})", item.target_label, item.target_count);
+        }
+    }
+
+    items
+}
+
+fn relation_target_label(investigation: &Investigation, relation: &Relation) -> String {
+    investigation
+        .graph
+        .entity(&relation.to)
+        .map(|entity| entity.name.clone())
+        .unwrap_or_else(|| relation.to.to_string())
 }
 
 struct EvidenceEntry<'a> {
@@ -290,29 +384,50 @@ fn collect_evidence(investigation: &Investigation) -> Vec<EvidenceEntry<'_>> {
     evidence
 }
 
-fn evidence_marker(investigation: &Investigation, relation: &Relation) -> String {
-    if relation.evidence.is_empty() {
-        return String::new();
-    }
-
+fn evidence_refs(investigation: &Investigation, relation: &Relation) -> Vec<EvidenceRef> {
+    let mut refs = Vec::new();
     let mut index = 1;
+
     for existing in investigation.graph.relations() {
         for evidence in &existing.evidence {
             if existing.from == relation.from
                 && existing.to == relation.to
                 && existing.kind == relation.kind
             {
-                return format!(" [e{index} {}]", evidence.confidence);
+                refs.push(EvidenceRef {
+                    id: format!("e{index}"),
+                    confidence: evidence.confidence,
+                });
             }
             index += 1;
         }
     }
 
-    String::new()
+    refs
 }
 
-fn indent(depth: usize) -> String {
-    "    ".repeat(depth)
+fn evidence_marker(evidence: &[EvidenceRef]) -> String {
+    let Some(first) = evidence.first() else {
+        return String::new();
+    };
+
+    if evidence.len() == 1 {
+        return format!(" [{} {}]", first.id, first.confidence);
+    }
+
+    if evidence
+        .iter()
+        .all(|item| item.confidence == first.confidence)
+    {
+        return format!(
+            " [{} +{} {}]",
+            first.id,
+            evidence.len() - 1,
+            first.confidence
+        );
+    }
+
+    format!(" [{} +{}]", first.id, evidence.len() - 1)
 }
 
 fn push_line(output: &mut String, line: &str) {
@@ -399,6 +514,60 @@ mod tests {
         assert!(output.contains("Relation: /tmp/link --resolves to--> /tmp/target"));
         assert!(output.contains("Backend: filesystem"));
         assert!(output.contains("Description: Path resolves to this canonical target"));
+    }
+
+    #[test]
+    fn compact_graph_renders_relation_and_target_on_one_line() {
+        let investigation = investigation_with_one_relation();
+        let output = plain::render(&investigation, plain::PlainRenderMode::Compact);
+
+        assert!(output.contains("└── resolves to /tmp/target [e1 exact]"));
+    }
+
+    #[test]
+    fn compact_graph_groups_repeated_leaf_targets() {
+        let mut graph = EvidenceGraph::new();
+        let store = graph.add_entity(Entity::new(
+            EntityId::new("store-path:/nix/store/demo"),
+            EntityKind::StorePath,
+            "/nix/store/demo",
+        ));
+        let root_one = graph.add_entity(Entity::new(
+            EntityId::new("file:/nix/var/nix/profiles/system-1-link"),
+            EntityKind::File,
+            "system profile",
+        ));
+        let root_two = graph.add_entity(Entity::new(
+            EntityId::new("file:/nix/var/nix/profiles/system-2-link"),
+            EntityKind::File,
+            "system profile",
+        ));
+        for root in [root_one, root_two] {
+            graph.add_relation(Relation::new(
+                store.clone(),
+                root,
+                RelationKind::ReachableFrom,
+                Confidence::Exact,
+                vec![Evidence::new(
+                    "nix",
+                    "nix-store --query --roots",
+                    "Nix reports this root",
+                    Confidence::Exact,
+                )],
+            ));
+        }
+
+        let investigation = Investigation {
+            query: Query::StorePath("/nix/store/demo".into()),
+            answer: "Nix store path found.".to_string(),
+            graph,
+            matches: vec![store],
+            incomplete: Vec::new(),
+            backend_status: Vec::new(),
+        };
+        let output = plain::render(&investigation, plain::PlainRenderMode::Compact);
+
+        assert!(output.contains("kept because of system profile (2) [e1 +1 exact]"));
     }
 
     #[test]
